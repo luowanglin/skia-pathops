@@ -1,0 +1,104 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [master]
+
+env:
+  # skip 3.7 on all platforms; only build pypy3 for linux
+  CIBW_SKIP: cp37-* pp*-macosx_x86_64 pp*-win_amd64
+  CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
+  CIBW_MANYLINUX_I686_IMAGE: manylinux2014
+  CIBW_MANYLINUX_PYPY_X86_64_IMAGE: manylinux2014
+  CIBW_TEST_EXTRAS: testing
+  CIBW_TEST_COMMAND: pytest {project}/tests
+  BUILD_SKIA_FROM_SOURCE: 0
+  SKIA_LIBRARY_DIR: "build/download"
+  CIBW_ENVIRONMENT: BUILD_SKIA_FROM_SOURCE=0 SKIA_LIBRARY_DIR=build/download
+
+jobs:
+  build_wheels:
+    runs-on: ${{ matrix.os }}
+    env:
+      CIBW_ARCHS: ${{ matrix.arch }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        arch: [auto64]
+        include:
+          - os: macos-latest
+            arch: universal2
+          - os: windows-latest
+            arch: x86
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: recursive
+    - name: Set up Python 3.x
+      uses: actions/setup-python@v2
+      with:
+        python-version: "3.x"
+    - name: Download pre-compiled libskia
+      env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        if [ "$BUILD_SKIA_FROM_SOURCE" == "0" ]; then
+          pip install githubrelease
+          if ! [[ $CIBW_ARCHS =~ ^auto ]]; then
+            cpu_arch="--cpu-arch=$CIBW_ARCHS"
+          fi
+          python ci/download_libskia.py -d "${SKIA_LIBRARY_DIR}" $cpu_arch
+        fi
+    - name: Install dependencies
+      run: pip install cibuildwheel
+    - name: Build and Test Wheels
+      run: python -m cibuildwheel --output-dir wheelhouse
+    - uses: actions/upload-artifact@v2
+      with:
+        name: skia_pathops-${{ matrix.os }}-${{ matrix.arch }}
+        path: wheelhouse/*.whl
+
+  build_aarch64_wheels:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # aarch64 uses qemu so it's slow, build each py version in parallel jobs
+        python: [38, 39, 310, 311]
+        arch: [aarch64]
+    env:
+      # Skip building aarch64 wheels for musllinux until I figure out why I get
+      # ImportError: Error relocating ...: __aarch64_cas8_acq_rel: symbol not found
+      # https://github.com/fonttools/skia-pathops/actions/runs/5143956953/jobs/9259626577#step:6:624
+      CIBW_SKIP: "*-musllinux*"
+      CIBW_BUILD: cp${{ matrix.python }}-*
+      CIBW_ARCHS: ${{ matrix.arch }}
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: recursive
+    - uses: docker/setup-qemu-action@v1.2.0
+      with:
+        platforms: all
+    - name: Download pre-compiled libskia
+      env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        if [ "$BUILD_SKIA_FROM_SOURCE" == "0" ]; then
+          pip install githubrelease
+          python ci/download_libskia.py -d "${SKIA_LIBRARY_DIR}" --cpu-arch "arm64"
+        fi
+    - name: Install dependencies
+      run: pip install cibuildwheel
+    - name: Build and Test Wheels
+      run: python -m cibuildwheel --output-dir wheelhouse
+    - uses: actions/upload-artifact@v2
+      with:
+        name: skia_pathops-${{ matrix.python }}-linux-${{ matrix.arch }}
+        path: wheelhouse/*.whl
